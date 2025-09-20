@@ -10,8 +10,9 @@
 
 
 # Run the following script to training our model and then perform boundary detection
-python -u code.py --num_epochs 10 --learning_rate 0.00001 --data_file data.xlsx  --examples_per_epoch 5000 --save_model 0  --prototype_size 2 > results.txt
+#python -u code.py --num_epochs 10 --learning_rate 0.00001 --data_file data.xlsx  --examples_per_epoch 5000 --save_model 0  --prototype_size 2 > results.txt
 
+python -u tribert_code_block.py --num_epochs 1 --learning_rate 0.00001 --data_file hybridCodeData_1boundary.xlsx  --examples_per_epoch 5 --save_model 0  --prototype_size 1 > results_1boundary_block_level.txt
 
 
 
