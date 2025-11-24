@@ -1,4 +1,4 @@
-
+#!/bin/bash
 #--topk: the length of the candidate list of the possible boundary indexes. 
 #--Num_epochs: The number of epochs for encoder training
 #--Examples_per_epoch: Number of examples for each epoch
@@ -7,12 +7,6 @@
 #--Save_model: Whether to save model or not. '0' means NO; '1' means YES
 #--Prototype_size: The number of consecutive sentences needed to calculate the averaged embedding (i.e., prototype).
 #
-
-
 # Run the following script to training our model and then perform boundary detection
-#python -u code.py --num_epochs 10 --learning_rate 0.00001 --data_file data.xlsx  --examples_per_epoch 5000 --save_model 0  --prototype_size 2 > results.txt
-
-python -u tribert_code_block.py --num_epochs 1 --learning_rate 0.00001 --data_file hybridCodeData_1boundary.xlsx  --examples_per_epoch 5 --save_model 0  --prototype_size 1 > results_1boundary_block_level.txt
-
-
-
+# python -u tribert.py --num_epochs 10 --learning_rate 0.00001 --data_file data.xlsx  --examples_per_epoch 5000 --save_model 0  --prototype_size 2 > results.txt
+python -u tribert_code.py --num_epochs 10 --learning_rate 0.00001 --data_file hybridCodeData_1boundary.xlsx  --examples_per_epoch 5000 --save_model 0  --prototype_size 1 > results_1boundary_sent_level_time2.txt
