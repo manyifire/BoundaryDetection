@@ -17,7 +17,7 @@ from sklearn.metrics import precision_score, recall_score, accuracy_score, f1_sc
 
 import ast
 import re
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 nltk.download('punkt_tab')
 
@@ -26,18 +26,100 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-
-
-def get_sentence(text):
+def get_block(source_code: str) -> List[Tuple[str, Tuple[int, int]]]:
     """
-    from nltk.tokenize import sent_tokenize
-    import nltk
+    将代码分割成不同的逻辑块
+    
+    参数:
+        source_code: 要分割的代码字符串
+        
+    返回:
+        List[Tuple[str, Tuple[int, int]]]: 每个元素是(代码块内容, (起始行, 结束行))
     """
-    # res = sent_tokenize(text)
-    # return [s.replace('\n',' ').strip() for s in res]
-    # return [line.strip() for line in text.split('\n') if line.strip()]
-    return text.split('\n')
-
+    # 清理源代码
+    cleaned_code = re.sub(r'^```\w*\s*|\s*```$', '', source_code.strip())
+    
+    try:
+        tree = ast.parse(cleaned_code)
+    except SyntaxError as e:
+        # 如果解析失败，返回整个代码作为一个块
+        lines = cleaned_code.splitlines()
+        return [(cleaned_code, (0, len(lines)-1))]
+    
+    blocks = []
+    lines = cleaned_code.splitlines()
+    
+    # 定义控制流节点类型
+    control_flow_nodes = (
+        ast.If, ast.For, ast.While, ast.Try, ast.With, ast.AsyncWith,
+        ast.Break, ast.Continue, ast.Return, ast.Raise, ast.Assert
+    )
+    
+    # 处理AST节点
+    def process_node(node, parent_type=None):
+        nonlocal blocks, lines
+        
+        # 获取节点的起始行和结束行
+        start_line = getattr(node, 'lineno', None)
+        end_line = getattr(node, 'end_lineno', None)
+        
+        if start_line is None:
+            return
+        
+        # 计算代码块结束行
+        if end_line is None:
+            # 对于没有结束行的节点，尝试找到下一个同级节点的起始行
+            if hasattr(node, 'parent') and hasattr(node.parent, 'body'):
+                index = node.parent.body.index(node)
+                if index + 1 < len(node.parent.body):
+                    next_node = node.parent.body[index + 1]
+                    end_line = getattr(next_node, 'lineno', len(lines)) - 1
+                else:
+                    end_line = len(lines)
+            else:
+                end_line = start_line
+        
+        # 提取对应行的源代码
+        code_block_lines = lines[start_line-1:end_line]
+        code_block = '\n'.join(code_block_lines)
+        
+        # 确定代码块类型
+        block_type = "other"
+        
+        if isinstance(node, ast.ClassDef):
+            block_type = "class_def"
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            block_type = "function_def"
+        elif isinstance(node, control_flow_nodes):
+            block_type = "control_flow"
+        elif isinstance(node, (ast.Import, ast.ImportFrom, ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            block_type = "other"  # 这些明确归类为"其他"
+        
+        # 添加到块列表
+        blocks.append((code_block, (start_line-1, end_line-1), block_type))
+        
+        # 对于函数和类，递归处理其子节点
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            for child in node.body:
+                if isinstance(child, ast.AST):
+                    child.parent = node
+                    process_node(child, block_type)
+    
+    # 为所有节点添加父节点引用
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            child.parent = node
+    
+    # 从顶级节点开始处理
+    for node in tree.body:
+        process_node(node)
+    
+    # 如果没有找到任何块，返回整个代码作为一个块
+    if not blocks:
+        return [(cleaned_code, (0, len(lines)-1))]
+    
+    # 返回代码块和它们的行号范围
+    return [(block, line_range) for block, line_range, _ in blocks]
 
 def get_euclidean_distance(v1,v2):
     return round(distance.euclidean(v1,v2),4)
@@ -73,193 +155,136 @@ def get_one_epoch_train_examples(data,examples_per_epoch, target_essayset=None):
         res.append( get_one_triplet_example(data) )
         
     return res
-   
-
-def split_code_into_blocks(code: str) -> List[str]:
-    """
-    将代码分割成不同的逻辑块
-    
-    参数:
-        code: 要分割的代码字符串
-        
-    返回:
-        List[str]: 每个元素是一个代码块的字符串
-    """
-    blocks = []
-    
-    try:
-        # 使用AST解析代码
-        tree = ast.parse(code)
-        
-        # 处理顶级节点
-        for node in tree.body:
-            if isinstance(node, ast.FunctionDef):
-                # 函数定义块
-                block_content = ast.get_source_segment(code, node)
-                blocks.append(block_content)
-            elif isinstance(node, ast.ClassDef):
-                # 类定义块
-                block_content = ast.get_source_segment(code, node)
-                blocks.append(block_content)
-            elif isinstance(node, (ast.If, ast.For, ast.While, ast.With, ast.Try)):
-                # 控制流块
-                block_content = ast.get_source_segment(code, node)
-                blocks.append(block_content)
-            else:
-                # 其他代码块（导入、赋值等）
-                block_content = ast.get_source_segment(code, node)
-                blocks.append(block_content)
-    
-    except SyntaxError:
-        # 如果AST解析失败，使用基于行的简单分割
-        blocks = split_code_by_lines(code)
-    
-    return blocks
-
-def split_code_by_lines(code: str) -> List[str]:
-    """
-    使用基于行的简单方法分割代码
-    
-    参数:
-        code: 要分割的代码字符串
-        
-    返回:
-        List[str]: 每个元素是一个代码块的字符串
-    """
-    blocks = []
-    lines = code.split('\n')
-    current_block = []
-    
-    for line in lines:
-        stripped_line = line.strip()
-        
-        # 检测空行作为块分隔符
-        if not stripped_line and current_block:
-            blocks.append('\n'.join(current_block))
-            current_block = []
-            continue
-        
-        current_block.append(line)
-    
-    # 添加最后一个块
-    if current_block:
-        blocks.append('\n'.join(current_block))
-    
-    return blocks
 
 def predict_boundary_for_one_essay(model, essay):
-    sents = get_sentence(essay)
-    blocks = split_code_into_blocks(essay)
+    print(f'test essay: \n {essay}')
+    # 使用新的块分割函数
+    blocks_with_ranges = get_block(essay)
+    blocks = [block for block, _ in blocks_with_ranges]
     print(f'blocks: {blocks}')
-    print(f'Number of blocks: {len(blocks)}')
-    sents_of_blocks = []
 
-    for block in blocks:
-        block_sents = get_sentence(block)
-        sents_of_blocks.append(block_sents)
-    print(f'sents_of_blocks: {sents_of_blocks}')
-
-    distance_result=[]
+    distance_result = []
+    blocks_emb = []
     
-    sents_emb = []
+    for block in blocks:
+        emb = model.encode([block]).flatten()
+        blocks_emb.append(emb)
 
-    for sent in sents:
-        emb = model.encode([sent]).flatten()
-        sents_emb.append(emb)
-
-    for i in range(len(sents_of_blocks)-1):
-        prototype_size = len(sents_of_blocks[i])
-        emb1 = sents_emb[max(i+1-prototype_size, 0): i+1]
-        emb2 = sents_emb[i+1: i+1+prototype_size]
+    for i in range(len(blocks_emb)-1):
+        emb1 = blocks_emb[max(i+1-prototype_size, 0): i+1]
+        emb2 = blocks_emb[i+1: i+1+prototype_size]
         
         p1 = np.mean(emb1, axis=0)
         p2 = np.mean(emb2, axis=0)
         dist = get_euclidean_distance(p1, p2)
         distance_result.append(dist)
-
-    #boundary= distance_result.index(max(distance_result)) + 1 # this is the predicted boundary_ix, meaning that (boundary_ix)th is the last human sentence.
-    boundary = sorted([(dist, ix+1) for ix, dist in enumerate(distance_result)], key=lambda x:x[0], reverse = True)
-    boundary = [ix for dist,ix in boundary][:topk]
     
+    # 计算边界
+    boundary = sorted([(dist, ix+1) for ix, dist in enumerate(distance_result)], 
+                     key=lambda x: x[0], reverse=True)
+    boundary = [ix for dist, ix in boundary][:topk]
+    
+    # 处理边界列表长度不足的情况
     if len(boundary) < topk:
-        if len([ i+1 for i in range(len(distance_result)) if (i+1) not in boundary]) < topk - len(boundary):
-            print(f'problem code: \n {essay}')
-            print(f'boundary: {boundary}')
-            print(f'distance_result: {distance_result}')
-
-            #在这里boundary = [] 时怎么办？
-
-            boundary += [boundary[-1]] * (topk - len(boundary))
-            
+        # 获取所有可能的候选索引
+        all_indices = [i+1 for i in range(len(distance_result))]
+        available_indices = [ix for ix in all_indices if ix not in boundary]
+        
+        # 如果边界列表为空，用随机候选填充
+        if len(boundary) == 0:
+            if len(available_indices) == 0:
+                # 如果没有可用索引，全部用默认值（如1）填充
+                boundary = [1] * topk
+            else:
+                # 随机选择足够的索引补全
+                additional = random.sample(available_indices, 
+                                         min(topk, len(available_indices)))
+                boundary.extend(additional)
+                # 如果仍然不足，重复最后一个元素
+                if len(boundary) < topk:
+                    boundary.extend([boundary[-1]] * (topk - len(boundary)))
         else:
-            boundary = boundary + random.sample([ i+1 for i in range(len(distance_result)) if (i+1) not in boundary] , topk - len(boundary))
-            random_boundary = random.sample( [ i+1 for i in range(len(distance_result))],topk )
+            # 原有处理逻辑
+            if len(available_indices) < (topk - len(boundary)):
+                boundary.extend([boundary[-1]] * (topk - len(boundary)))
+            else:
+                boundary.extend(random.sample(available_indices, topk - len(boundary)))
         
-        boundary = sorted(boundary)
-        
-    if len(distance_result)< topk :
+        boundary.sort()  # 保持排序
+
+    if len(distance_result) < topk:
         random_boundary = boundary
     else:
-        random_boundary = random.sample( [ i+1 for i in range(len(distance_result))],topk )
-    
-    #random_boundary = random.sample( list(range(len(sent_predictions)))[1:] ,topk )
+        random_boundary = random.sample([i+1 for i in range(len(distance_result))], topk)
     
     return boundary, random_boundary
 
-def get_evaluation_result(predicted,labels):
-    
-    tpl = list(zip(predicted,labels))
-    result={'accurance':[],'precision':[],'recall':[],'f1_score':[]}
+def get_evaluation_result(predicted, labels):
+    tpl = list(zip(predicted, labels))
+    result = {'accurance':[], 'precision':[], 'recall':[], 'f1_score':[]}
     
     for p, l in tpl:
         intersection = set(p) & set(l)
-        precision = 0.0001+len(intersection) * 1.0 / topk
-        recall = 0.0001+len(intersection) * 1.0 / len(l)
+        precision = 0.0001 + len(intersection) * 1.0 / topk
+        recall = 0.0001 + len(intersection) * 1.0 / len(l)
        
-        result['precision'].append(  precision ) 
-        result['recall'].append( recall ) 
-        result['f1_score'].append(  2 * precision * recall*1.0 / (precision + recall) )   #f1_score = 2 * precision * recall*1.0 / (precision + recall)
+        result['precision'].append(precision) 
+        result['recall'].append(recall) 
+        result['f1_score'].append(2 * precision * recall * 1.0 / (precision + recall))
     
-    return round( np.mean(result['precision']) ,3), round( np.mean(result['recall']) ,3), round( np.mean(result['f1_score']) ,3)
+    return round(np.mean(result['precision']), 3), round(np.mean(result['recall']), 3), round(np.mean(result['f1_score']), 3)
 
-# pred与label指的是预测的boundary list与实际的boundary list
-def get_classification_labels(code,predicted,labels):
-    lines = code.split('\n')
+def get_classification_labels(code, predicted, labels):
+    """
+    修改为基于代码块的标签生成
+    """
+    blocks_with_ranges = get_block(code)
+    num_blocks = len(blocks_with_ranges)
+    
     real_label_H, real_label_M, pred_label_H, pred_label_M = None, None, None, None
 
     if len(labels) == 0:
         print('!!!!!!!!!!!!!!labels is empty: ', labels)
     
-    if len(labels) == 1:
-        # if HM
-        if labels[0] !=None:
-            for l in lines:
-                real_label_H =[0]*labels[0] + [1]*(len(lines) - labels[0])
-                real_label_M = [1]*labels[0] + [0]*(len(lines) - labels[0])
+    # 将行号边界转换为块索引边界
+    def line_boundary_to_block_boundary(line_boundaries, blocks_with_ranges):
+        block_boundaries = []
+        for line_boundary in line_boundaries:
+            # 找到包含该行号的块
+            for block_idx, (_, (start_line, end_line)) in enumerate(blocks_with_ranges):
+                if start_line <= line_boundary <= end_line:
+                    block_boundaries.append(block_idx + 1)  # 转换为1-based索引
+                    break
+            else:
+                # 如果没有找到，使用最后一个块
+                block_boundaries.append(len(blocks_with_ranges))
+        return block_boundaries
     
-    if len(labels) == 2:
-        if labels[0] !=None and labels[1] != None:
-            # if HMH or MHM
-            for l in lines:      
-                real_label_H = [0]*labels[0] + [1]*(labels[1] - labels[0]) + [0]*(len(lines) - labels[1])
-                real_label_M = [1]*labels[0] + [0]*(labels[1] - labels[0]) + [1]*(len(lines) - labels[1])
-        
-    if len(predicted) == 0:
-        print('!!!!!!!!!!!!!!predicted is empty: ', predicted)
+    # 转换真实标签
+    block_labels = line_boundary_to_block_boundary(labels, blocks_with_ranges) if labels else []
     
+    if len(block_labels) == 1:
+        # HM模式
+        boundary = block_labels[0]
+        real_label_H = [0] * boundary + [1] * (num_blocks - boundary)
+        real_label_M = [1] * boundary + [0] * (num_blocks - boundary)
+    
+    elif len(block_labels) == 2:
+        # HMH或MHM模式
+        boundary1, boundary2 = block_labels
+        real_label_H = [0] * boundary1 + [1] * (boundary2 - boundary1) + [0] * (num_blocks - boundary2)
+        real_label_M = [1] * boundary1 + [0] * (boundary2 - boundary1) + [1] * (num_blocks - boundary2)
+    
+    # 处理预测边界
     if len(predicted) == 1:
-        # if HM
-        for l in lines:
-            pred_label_H =[0]*predicted[0] + [1]*(len(lines) - predicted[0])
-            pred_label_M = [1]*predicted[0] + [0]*(len(lines) - predicted[0])
-
-    if len(predicted) == 2:
-        # if HMH or MHM
-        for l in lines:
-            pred_label_H = [0]*predicted[0] + [1]*(predicted[1] - predicted[0]) + [0]*(len(lines) - predicted[1])
-            pred_label_M = [1]*predicted[0] + [0]*(predicted[1] - predicted[0]) + [1]*(len(lines) - predicted[1])
-
+        boundary = predicted[0]
+        pred_label_H = [0] * boundary + [1] * (num_blocks - boundary)
+        pred_label_M = [1] * boundary + [0] * (num_blocks - boundary)
     
+    elif len(predicted) == 2:
+        boundary1, boundary2 = predicted
+        pred_label_H = [0] * boundary1 + [1] * (boundary2 - boundary1) + [0] * (num_blocks - boundary2)
+        pred_label_M = [1] * boundary1 + [0] * (boundary2 - boundary1) + [1] * (num_blocks - boundary2)
 
     return real_label_H, real_label_M, pred_label_H, pred_label_M
 
@@ -277,8 +302,9 @@ def get_classification_results(real_label_H, real_label_M, pred_label_H, pred_la
     recall = -1
 
     for key, val in metrics.items():
-        print('===================\n')
-        print(len(val['real']), len(val['pred']))
+        if len(val['real']) != len(val['pred']):
+            continue
+            
         current_accuracy = accuracy_score(np.array(val['real']), np.array(val['pred']))
         current_macro_f1 = f1_score(np.array(val['real']), np.array(val['pred']), average='macro')
 
@@ -292,7 +318,6 @@ def get_classification_results(real_label_H, real_label_M, pred_label_H, pred_la
             best_macro_f1 = current_macro_f1
             precision = precision_score(np.array(val['real']), np.array(val['pred']), average=None)
             recall = recall_score(np.array(val['real']), np.array(val['pred']), average=None)
-            
 
     print("Accuracy: {:.1f}".format(best_accuracy * 100))
     print("Macro F1 Score: {:.1f}".format(best_macro_f1 * 100))
@@ -300,7 +325,7 @@ def get_classification_results(real_label_H, real_label_M, pred_label_H, pred_la
     precision_recall = ' '.join(["{:.1f}/{:.1f}".format(p*100, r*100) for p, r in zip(precision, recall)])
     print(precision_recall)
 
-    result = {"precision":precision, "recall":recall, "accuracy":best_accuracy, "macro_f1":best_macro_f1}
+    result = {"precision": precision, "recall": recall, "accuracy": best_accuracy, "macro_f1": best_macro_f1,"precision_recall": precision_recall}
     
     print(result)
     return result
@@ -309,66 +334,63 @@ def evaluate_model(model, data, targetprompt, test_type):
     print('--------Start Evaluating: {}--------'.format(str(datetime.datetime.now())[:19]))
     if test_type == 'valid':
         prompt_data = data[
-            #(data.essayset != targetprompt)
-            #&
             (data.set_ix == 'valid')
-            #&
-            #(data.ratio > 0.81)
         ]
     elif test_type == 'test':  # that is 'test' type on unseen prompt
         prompt_data = data[
             (data.set_ix == 'test')
         ]
     
-    all_hybird_essay = list( prompt_data['hybrid_code'])
-    #all_labels = list(prompt_data['boundary_ix'])
+    all_hybird_essay = list(prompt_data['hybrid_code'])
     all_labels = [ast.literal_eval(e) for e in list(prompt_data['boundary_ix'])] # each elements is a list
     all_predicted_boundary = []
-    random_guess=[]
+    random_guess = []
     allreal_label_H = []
     allreal_label_M = []
     allpred_label_H = []
     allpred_label_M = []
 
-    for idx,essay in enumerate(all_hybird_essay):
+    for idx, essay in enumerate(all_hybird_essay):
         if all_labels[idx] is None or len(all_labels[idx]) == 0:
             print('problem code: \n {}'.format(essay))
             continue
-        if len(all_labels[idx]) ==1:
+        if len(all_labels[idx]) == 1:
             if all_labels[idx][0] == None:
                 print('problem code: \n {}'.format(essay))
                 continue
-        if len(all_labels[idx]) ==2:
+        if len(all_labels[idx]) == 2:
             if all_labels[idx][0] == None or all_labels[idx][1] == None:
                 print('problem code: \n {}'.format(essay))
                 continue
-        if(type(essay) != str):
+        if type(essay) != str:
             print('problem code: \n {}'.format(essay))
             continue
-        if len(essay.split('\n')) <= 5:
+        
+        # 检查代码块数量
+        blocks = get_block(essay)
+        if len(blocks) <= 1:  # 至少需要2个块才能有边界
             continue
-        predicted_boundary,rn_boundary = predict_boundary_for_one_essay(model, essay)
+            
+        predicted_boundary, rn_boundary = predict_boundary_for_one_essay(model, essay)
         all_predicted_boundary.append(predicted_boundary)
         random_guess.append(rn_boundary)
 
-        real_label_H,real_label_M,pred_label_H,pred_label_M = get_classification_labels(essay, predicted_boundary, all_labels[idx])
-        # if real_label_H is not None and real_label_M is not None:
-        if len(real_label_H)  == len(pred_label_H) or \
-            len(real_label_H)== len(pred_label_M) or \
-            len(real_label_M) == len(pred_label_H) or \
-            len(real_label_M) == len(pred_label_M):
-            allreal_label_H.extend(real_label_H)
-            allreal_label_M.extend(real_label_M)
-            allpred_label_H.extend(pred_label_H)
-            allpred_label_M.extend(pred_label_M)
-        else:
-            print('real_label_H: {}, real_label_M: {}, pred_label_H: {}, pred_label_M: {}'.format(
-                len(real_label_H), len(real_label_M), len(pred_label_H), len(pred_label_M)
-            ))
-            continue
+        real_label_H, real_label_M, pred_label_H, pred_label_M = get_classification_labels(essay, predicted_boundary, all_labels[idx])
         
-    precision, recall, f1_score = get_evaluation_result(all_predicted_boundary, all_labels)
+        # 确保标签长度一致
+        if (real_label_H is not None and pred_label_H is not None and 
+            len(real_label_H) == len(pred_label_H)):
+            allreal_label_H.extend(real_label_H)
+            allpred_label_H.extend(pred_label_H)
+        
+        if (real_label_M is not None and pred_label_M is not None and 
+            len(real_label_M) == len(pred_label_M)):
+            allreal_label_M.extend(real_label_M)
+            allpred_label_M.extend(pred_label_M)
+        
+    precision, recall, f1_score_val = get_evaluation_result(all_predicted_boundary, all_labels)
     rn_precision, rn_recall, rn_f1_score = get_evaluation_result(random_guess, all_labels)
+    
     classification_result = get_classification_results(
         allreal_label_H, allreal_label_M, allpred_label_H, allpred_label_M
     )
@@ -376,7 +398,7 @@ def evaluate_model(model, data, targetprompt, test_type):
     print('--------------------{}ing------------------------'.format(test_type))
     print('Precision: {}'.format(precision))
     print('Recall: {}'.format(recall))
-    print('f1_score: {}'.format(f1_score))
+    print('f1_score: {}'.format(f1_score_val))
     print('-----Random-------')
     print('rn_Precision: {}'.format(rn_precision))
     print('rn_Recall: {}'.format(rn_recall))
@@ -387,6 +409,7 @@ def evaluate_model(model, data, targetprompt, test_type):
     print('Recall: {}'.format(classification_result['recall']))
     print('f1_score: {}'.format(classification_result['macro_f1']))
     print('Accuracy: {}'.format(classification_result['accuracy']))
+    print('Precision/Recall per class: {}'.format(classification_result['precision_recall']))
         
     if test_type == 'test':
         result_file = 'lr_{}_predicted_results_{}.xlsx'.format(lr, targetprompt)
@@ -398,8 +421,7 @@ def evaluate_model(model, data, targetprompt, test_type):
         
     print('--------Ending Evaluating: {}--------'.format(str(datetime.datetime.now())[:19]))
         
-    return f1_score
-        
+    return f1_score_val       
 
 def train_model(model, data, lr, num_epochs, examples_per_epoch, current_prompt=None,save_model = 1):
     
